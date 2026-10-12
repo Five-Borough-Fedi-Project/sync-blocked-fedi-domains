@@ -17,7 +17,11 @@ Google Sheets produces a small or empty list, which is a `fail`: there is
 nothing to review, the input is broken. A genuine week where IFTAS adds forty
 domains is a `review`: the input is fine and the decision is a moderator's.
 
-Usage: check.py CANDIDATE_CSV INSTANCE_JSON
+Writes the rows that should actually be pushed to APPLICABLE_CSV, which is
+the merged list minus the canaries. The apply step reads that file and not
+the raw merge, so a canary can never reach the instance.
+
+Usage: check.py CANDIDATE_CSV INSTANCE_JSON APPLICABLE_CSV
 """
 import csv
 import json
@@ -28,6 +32,16 @@ import sys
 # one of their lists. If it survived the fetch and the merge then real rows made
 # it through end to end.
 CANARY = "cariad.invalid"
+
+# ...and then it has to be thrown away, along with `dni.invalid` and
+# `aud.invalid`, the other two lists' markers. They are proof the fetch worked,
+# not domains anybody federates with, and fediblockhole has no code path that
+# deletes a block -- pushing one would park it in the moderation table forever.
+#
+# Matched on the TLD rather than by name because the set of lists will change.
+# RFC 2606 reserves `.invalid` precisely so that nothing can ever resolve there,
+# so a real instance cannot be caught by this.
+RESERVED_TLD = ".invalid"
 
 # A floor, not an estimate. The three lists merged to 204 domains on 2026-10-09.
 # Fifty is far below any plausible shrinkage and far above a truncated sheet or
@@ -63,6 +77,15 @@ def read_candidate(path):
         return {r["domain"]: r for r in reader if r.get("domain")}
 
 
+def write_applicable(path, candidate):
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=EXPECTED_HEADER)
+        writer.writeheader()
+        for domain in sorted(candidate):
+            row = candidate[domain]
+            writer.writerow({k: row.get(k, "") for k in EXPECTED_HEADER})
+
+
 def read_allowlist():
     # Resolved from this file's location, not the working directory. A
     # cwd-relative lookup that silently found nothing would turn the allowlist
@@ -90,7 +113,7 @@ def read_instance(path):
 
 
 def main(argv):
-    if len(argv) != 3:
+    if len(argv) != 4:
         print(__doc__.strip(), file=sys.stderr)
         return 2
 
@@ -131,6 +154,13 @@ def main(argv):
         return 1
 
     print("allowlist: %d entries, none present in the merged list" % len(allowed))
+
+    markers = sorted(d for d in candidate if d.endswith(RESERVED_TLD))
+    for d in markers:
+        del candidate[d]
+    print("dropped %d list marker(s) in %s: %s" % (
+        len(markers), RESERVED_TLD, ", ".join(markers) or "none"))
+    write_applicable(argv[3], candidate)
 
     # What applying would actually do. Removals are listed for information
     # only: fediblockhole has no code path that deletes a domain block, so a
