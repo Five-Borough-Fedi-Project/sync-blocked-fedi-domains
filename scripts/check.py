@@ -17,17 +17,49 @@ Google Sheets produces a small or empty list, which is a `fail`: there is
 nothing to review, the input is broken. A genuine week where IFTAS adds forty
 domains is a `review`: the input is fine and the decision is a moderator's.
 
-Usage: check.py CANDIDATE_CSV INSTANCE_JSON
+Writes the rows that should actually be pushed to APPLICABLE_CSV, which is
+the merged list minus the marker rows. The apply step reads that file and not
+the raw merge, so a canary can never reach the instance.
+
+Usage: check.py CANDIDATE_CSV INSTANCE_JSON APPLICABLE_CSV
 """
 import csv
 import json
 import os
 import sys
 
-# IFTAS puts a block on `cariad.invalid`, a domain in an invalid TLD, into every
-# one of their lists. If it survived the fetch and the merge then real rows made
-# it through end to end.
-CANARY = "cariad.invalid"
+# Each IFTAS list carries its own marker row, in a TLD that cannot resolve, named
+# after the list. Verified against the live sheets on 2026-10-12:
+#
+#   dni.invalid     DNI          95 rows
+#   aud.invalid     AUD          49 rows
+#   cariad.invalid  CARIAD 66%  115 rows
+#
+# All three are asserted, not just one, because they are a *per-list* integrity
+# check and nothing else in here is. A sheet that answers with an HTML error page
+# under throttling yields no rows, and losing one list means fewer additions
+# proposed -- so a partial fetch makes the size gate *more* likely to say `ok`
+# and apply. Checking a single marker would let two thirds of the input vanish
+# silently with every other guard satisfied; MIN_ROWS would not catch it either,
+# since any two of these lists together clear it comfortably.
+#
+# Keep this in step with blocklist_url_sources in sources.toml. A list added
+# without its marker here is a list whose disappearance nobody would notice.
+CANARIES = {"dni.invalid", "aud.invalid", "cariad.invalid"}
+
+# ...and then every one of them has to be thrown away. They are proof the fetch
+# worked, not domains anybody federates with, and fediblockhole has no code path
+# that deletes a block -- pushing one would park it in the moderation table
+# forever.
+#
+# Stripped by TLD rather than against CANARIES above, so that a list added to
+# sources.toml without its marker being registered here still cannot leak that
+# marker onto the instance. The two checks fail independently and in opposite
+# directions: CANARIES catches a marker that should be present and is not, this
+# catches one that is present and should not be applied.
+# RFC 2606 reserves `.invalid` precisely so that nothing can ever resolve there,
+# so a real instance cannot be caught by this.
+RESERVED_TLD = ".invalid"
 
 # A floor, not an estimate. The three lists merged to 204 domains on 2026-10-09.
 # Fifty is far below any plausible shrinkage and far above a truncated sheet or
@@ -63,6 +95,15 @@ def read_candidate(path):
         return {r["domain"]: r for r in reader if r.get("domain")}
 
 
+def write_applicable(path, candidate):
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=EXPECTED_HEADER)
+        writer.writeheader()
+        for domain in sorted(candidate):
+            row = candidate[domain]
+            writer.writerow({k: row.get(k, "") for k in EXPECTED_HEADER})
+
+
 def read_allowlist():
     # Resolved from this file's location, not the working directory. A
     # cwd-relative lookup that silently found nothing would turn the allowlist
@@ -90,7 +131,7 @@ def read_instance(path):
 
 
 def main(argv):
-    if len(argv) != 3:
+    if len(argv) != 4:
         print(__doc__.strip(), file=sys.stderr)
         return 2
 
@@ -112,10 +153,12 @@ def main(argv):
             "only %d domains in the merged list, floor is %d. Suspect a failed "
             "or partial fetch." % (len(candidate), MIN_ROWS)
         )
-    if CANARY not in candidate:
+    missing = sorted(CANARIES - set(candidate))
+    if missing:
         hard.append(
-            "canary %r missing from the merged list. Every IFTAS list carries "
-            "it, so losing it means rows were lost." % CANARY
+            "marker row(s) %s missing from the merged list. Each list carries "
+            "exactly one, so a missing marker means that whole list failed to "
+            "fetch and its domains are absent." % ", ".join(missing)
         )
     leaked = sorted(allowed & set(candidate))
     if leaked:
@@ -131,6 +174,13 @@ def main(argv):
         return 1
 
     print("allowlist: %d entries, none present in the merged list" % len(allowed))
+
+    markers = sorted(d for d in candidate if d.endswith(RESERVED_TLD))
+    for d in markers:
+        del candidate[d]
+    print("dropped %d list marker(s) in %s: %s" % (
+        len(markers), RESERVED_TLD, ", ".join(markers) or "none"))
+    write_applicable(argv[3], candidate)
 
     # What applying would actually do. Removals are listed for information
     # only: fediblockhole has no code path that deletes a domain block, so a

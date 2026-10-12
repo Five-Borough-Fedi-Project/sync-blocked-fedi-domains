@@ -148,7 +148,8 @@ jobs:
           # The script exits non-zero only on `fail`. `review` is a decision,
           # not an error, so it exits 0 and the verdict is read from stdout.
           set +e
-          python3 scripts/check.py /tmp/candidate.csv /tmp/instance.json > /tmp/report.txt
+          python3 scripts/check.py /tmp/candidate.csv /tmp/instance.json \
+            /tmp/applicable.csv > /tmp/report.txt
           rc=$?
           set -e
           cat /tmp/report.txt
@@ -165,9 +166,11 @@ jobs:
           exit 0
 
       # Push only the additions and escalations the gate approved. The source
-      # here is the merged candidate, and fediblockhole fetches the instance's
-      # own blocks to work out the difference, so nothing already correct is
-      # touched.
+      # here is /tmp/applicable.csv, which check.py wrote: the merged candidate
+      # minus the lists' `.invalid` canary rows. Never /tmp/candidate.csv --
+      # that one still has the canaries in it, and fediblockhole cannot delete
+      # a block once it is made. fediblockhole fetches the instance's own blocks
+      # to work out the difference, so nothing already correct is touched.
       #
       # max_followed_severity = 'silence' is the guard that matters. Every row
       # in these lists is `suspend`, and a suspend severs existing follow
@@ -196,7 +199,7 @@ jobs:
 
           cat > /tmp/apply.toml <<EOF
           blocklist_url_sources = [
-            { url = 'file:///tmp/candidate.csv', format = 'csv' },
+            { url = 'file:///tmp/applicable.csv', format = 'csv' },
           ]
           allowlist_url_sources = [
             { url = 'file://${GITHUB_WORKSPACE}/allowlist.csv', format = 'csv' },
