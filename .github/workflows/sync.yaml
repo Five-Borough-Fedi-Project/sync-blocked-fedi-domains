@@ -197,6 +197,38 @@ jobs:
             echo "::warning::Applying a change the size gate held, because allow_large_change was set."
           fi
 
+          # Pre-flight the one endpoint whose scope is easy to miss.
+          #
+          # max_followed_severity below makes fediblockhole call
+          # /api/v1/admin/measures for every new block and every severity
+          # escalation, and that endpoint needs the broad `admin:read` scope
+          # rather than the admin:*:domain_blocks pair everything else here
+          # uses. Without it the push dies partway: run 38391365273 rewrote
+          # three public_comments, hit 403 on its first new block, and left the
+          # instance in a state nobody had asked for.
+          #
+          # Probing once, before anything is pushed, converts that into a
+          # failure that changed nothing. The domain is a reserved one from
+          # RFC 2606 so the query matches nothing and returns a count of zero;
+          # the status code is the whole point, not the body.
+          code=$(curl -sS -o /tmp/measures.json -w '%{http_code}' \
+            -X POST "https://masto.nyc/api/v1/admin/measures" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H 'Content-Type: application/json' \
+            -d '{"keys":["instance_follows"],"instance_follows":{"domain":"example.invalid"}}')
+          case "$code" in
+            200)
+              echo "Token can read admin measures, so the follow-severity guard will work." ;;
+            403)
+              echo "::error::The token cannot read /api/v1/admin/measures (403). That endpoint needs the admin:read scope, which max_followed_severity depends on. Nothing was applied. Either add admin:read to MASTODON_ADMIN_TOKEN, or drop the follow guard deliberately."
+              head -c 300 /tmp/measures.json || true
+              exit 1 ;;
+            *)
+              echo "::error::/api/v1/admin/measures returned HTTP ${code}, so the follow-severity guard cannot be trusted. Nothing was applied. This is not necessarily a scope problem -- check the instance is healthy."
+              head -c 300 /tmp/measures.json || true
+              exit 1 ;;
+          esac
+
           cat > /tmp/apply.toml <<EOF
           blocklist_url_sources = [
             { url = 'file:///tmp/applicable.csv', format = 'csv' },
