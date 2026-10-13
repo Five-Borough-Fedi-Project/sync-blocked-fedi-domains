@@ -325,14 +325,38 @@ jobs:
 
           base="${WEBHOOK%/}"; base="${base%/slack}"; base="${base%/github}"
 
+          # A secret pasted by hand can carry a trailing newline or lose its
+          # scheme, and neither is visible in a masked log: run 38398720935
+          # printed `curl: (6) Could not resolve host: ***`, which failed the
+          # step and buried the 403 that was the actual problem.
+          base="$(printf '%s' "$base" | tr -d '[:space:]')"
+          case "$base" in
+            https://*) ;;
+            *)
+              echo "::warning::DISCORD_OPS_WEBHOOK is not an https:// URL, so nothing was sent. Check the secret for a missing scheme or a stray newline -- and for a repository-level secret shadowing the organisation one."
+              echo "Discord was not notified: the webhook secret is not a URL." >> "$GITHUB_STEP_SUMMARY"
+              exit 0 ;;
+          esac
+
           jq -nc --arg head "$head" --arg detail "$detail" --arg url "$RUN_URL" \
             '{text: ($head + "\n```\n" + $detail + "\n```\n" + $url)}' > /tmp/payload.json
 
+          # This step reports; it does not decide. A notifier that cannot be
+          # reached must not invent a failure, nor mask the one the rest of the
+          # job already found, so every outcome here is a warning and an exit 0.
+          set +e
           code=$(curl -sS -o /tmp/response -w '%{http_code}' \
             -X POST -H 'Content-Type: application/json' \
             --data @/tmp/payload.json "${base}/slack")
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::Could not reach Discord (curl exit ${rc}), so nothing was sent. Whatever the rest of this run concluded still stands."
+            echo "Discord was not notified: could not reach the webhook." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [ "$code" != "200" ] && [ "$code" != "204" ]; then
-            echo "::warning::Discord returned HTTP ${code}. The changes above still applied."
+            echo "::warning::Discord returned HTTP ${code}, so the message was not delivered. Whatever the rest of this run concluded still stands."
             head -c 300 /tmp/response || true
           fi
 
