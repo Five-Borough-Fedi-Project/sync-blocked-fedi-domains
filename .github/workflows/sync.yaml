@@ -100,7 +100,44 @@ jobs:
         run: |
           set -euo pipefail
           python3 - <<'PYEOF'
-          import json, os, urllib.request, re, sys
+          import json, os, urllib.error, urllib.request, re, sys
+
+
+          def refused(exc):
+              """Say who refused, not just that somebody did.
+
+              A bare "HTTP Error 403: Forbidden" is the least useful thing this
+              job can report, and it is what run 38394671307 reported. Mastodon
+              answers a scope or role problem with a JSON error body; anything
+              in front of it -- Cloudflare, a WAF, a tunnel -- answers with HTML
+              and its own headers. They are the same status code and completely
+              different problems, so print enough to tell them apart.
+              """
+              print("the request was refused: HTTP %s %s" % (exc.code, exc.reason))
+              for header in ("server", "content-type", "cf-ray", "cf-mitigated",
+                             "www-authenticate", "x-ratelimit-remaining",
+                             "retry-after"):
+                  value = exc.headers.get(header)
+                  if value:
+                      print("  %s: %s" % (header, value))
+              try:
+                  body = exc.read(600).decode("utf-8", "replace").strip()
+              except Exception:
+                  body = "(unreadable)"
+              print("  body: %s" % (body or "(empty)"))
+              if exc.code in (401, 403) and "outside the authorized scopes" in body:
+                  print("  -> Mastodon itself refused this: the token's scopes are "
+                        "wrong. It needs admin:read:domain_blocks, or the broader "
+                        "admin:read.")
+              elif exc.code == 403 and "text/html" in (exc.headers.get("content-type") or ""):
+                  print("  -> an HTML 403 is not Mastodon. Something in front of the "
+                        "instance refused the runner -- check for a WAF or bot rule, "
+                        "not the token.")
+              elif exc.code in (401, 403):
+                  print("  -> a JSON-less %s from Mastodon usually means the token's "
+                        "account lost the Manage Federation role permission, which is "
+                        "required alongside the scope." % exc.code)
+              sys.exit(1)
 
           token = os.environ["TOKEN"]
           url = "https://masto.nyc/api/v1/admin/domain_blocks?limit=200"
@@ -111,9 +148,15 @@ jobs:
                   "Authorization": "Bearer " + token,
                   "User-Agent": "masto.nyc blocklist-sync",
               })
-              with urllib.request.urlopen(req, timeout=30) as resp:
-                  body = json.load(resp)
-                  link = resp.headers.get("Link", "")
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      body = json.load(resp)
+                      link = resp.headers.get("Link", "")
+              except urllib.error.HTTPError as exc:
+                  refused(exc)
+              except urllib.error.URLError as exc:
+                  sys.exit("could not reach masto.nyc at all: %s. That is the network "
+                           "or the instance being down, not the token." % exc.reason)
               if not isinstance(body, list):
                   sys.exit("admin API returned %s, not a list of blocks" % type(body).__name__)
               blocks += body
