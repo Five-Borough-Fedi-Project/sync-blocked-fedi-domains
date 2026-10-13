@@ -142,12 +142,30 @@ Two repository secrets:
 
 | secret | why |
 |---|---|
-| `MASTODON_ADMIN_TOKEN` | needs `admin:read:domain_blocks` and `admin:write:domain_blocks`. Read is not optional: without it there is nothing to compare against, so the job logs a notice and exits 0. |
+| `MASTODON_ADMIN_TOKEN` | needs `admin:read`, `admin:read:domain_blocks` and `admin:write:domain_blocks`. Read is not optional: without it there is nothing to compare against, so the job logs a notice and exits 0. The broad `admin:read` is there for `max_followed_severity` (see below), and the apply step pre-flights it rather than discovering it halfway through a push. |
 | `DISCORD_OPS_WEBHOOK` | the ops channel. Without it the sync still runs and still applies; it just says nothing. |
 
 The token is a secret rather than a config value on purpose. The job this
 replaces put it inline in a TOML file inside a Kubernetes ConfigMap, where
 `kubectl describe` would print it.
+
+### Why the token needs `admin:read`
+
+`max_followed_severity = 'silence'` is the guard that stops a suspend severing
+follow relationships somebody here already has. fediblockhole implements it by
+asking `/api/v1/admin/measures` for the `instance_follows` count of each domain
+before it blocks or escalates one, and that endpoint is gated on `admin:read` --
+not on the granular `admin:read:domain_blocks`.
+
+So the token reads more than it writes. It can read anything the admin API
+exposes, and write nothing but domain blocks. That is a deliberate trade: the
+alternative is dropping the guard, which means suspending general-population
+instances outright and cutting existing follows without warning.
+
+Every row in these lists is `suspend`, and `check_followed_severity` only skips
+the lookup when the new severity is at or below `max_followed_severity`. So the
+lookup happens for every addition and every escalation -- it is not an edge
+case, and a token without the scope fails on the first one.
 
 ## Why its own repository
 
