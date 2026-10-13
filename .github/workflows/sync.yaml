@@ -292,7 +292,9 @@ jobs:
             cp /tmp/diff.txt /tmp/diff.shown
           fi
 
-          case "${VERDICT:-fail}" in
+          # Not ${VERDICT:-fail}: an empty verdict means no verdict was
+          # reached, which is the `*)` case below, not a `fail`.
+          case "${VERDICT:-}" in
             ok|review)
               if [ "${APPLIED:-skipped}" = "success" ]; then
                 if [ "${VERDICT}" = "review" ]; then
@@ -308,9 +310,17 @@ jobs:
                 head="**Blocklist change held for review**: ${CHANGES} change(s), over the size gate. Nothing applied. Re-run with allow_large_change to accept it."
                 detail=$(cat /tmp/diff.shown)
               fi ;;
-            *)
+            fail)
               head="**Blocklist sync refused the fetched data.** Nothing was applied, and there is nothing worth reviewing: the input is broken, not the decision."
-              detail=$(grep '^reason:' /tmp/report.txt | head -5 || echo "see the run") ;;
+              detail=$(grep '^reason:' /tmp/report.txt 2>/dev/null | head -5 || echo "see the run") ;;
+            *)
+              # No verdict at all: a step before the gate died and check.py
+              # never ran. Distinct from `fail`, where check.py did run and
+              # judged the data untrustworthy. Saying the lists are broken
+              # here would be a lie -- run 38394671307 said exactly that
+              # after the instance read returned 403.
+              head="**Blocklist sync broke before it could judge anything.** Nothing was applied and no list was assessed. A step before the gate failed, so this is the job, the token or the instance -- not the blocklists."
+              detail="see the run" ;;
           esac
 
           base="${WEBHOOK%/}"; base="${base%/slack}"; base="${base%/github}"
