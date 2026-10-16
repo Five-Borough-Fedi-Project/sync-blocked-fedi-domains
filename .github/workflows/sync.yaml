@@ -376,8 +376,25 @@ jobs:
           case "$base" in
             https://*) ;;
             *)
-              echo "::warning::DISCORD_OPS_WEBHOOK is not an https:// URL, so nothing was sent. Check the secret for a missing scheme or a stray newline -- and for a repository-level secret shadowing the organisation one."
-              echo "Discord was not notified: the webhook secret is not a URL." >> "$GITHUB_STEP_SUMMARY"
+              # Say what the stored value looks like without printing it.
+              # Knowing it is "not a URL" cost three days on its own; the
+              # length alone separates a bare token from a truncated URL from
+              # a stray character, and none of these facts reveal the secret.
+              # A prefix would, because GitHub masks the whole value and not
+              # substrings of it, so this prints no part of it.
+              raw_len=${#WEBHOOK}
+              trimmed_len=${#base}
+              if printf '%s' "$base" | grep -qE '^[A-Za-z0-9_-]{50,100}$'; then
+                shape="looks like the token on its own, with no https://discord.com/api/webhooks/<id>/ in front of it"
+              elif printf '%s' "$base" | grep -q 'discord\.com'; then
+                shape="contains discord.com but does not begin with https://"
+              elif [ "$raw_len" -ne "$trimmed_len" ]; then
+                shape="carries whitespace that trimming did not rescue"
+              else
+                shape="matches nothing expected"
+              fi
+              echo "::warning::DISCORD_OPS_WEBHOOK is not an https:// URL, so nothing was sent. ${raw_len} characters as stored, ${trimmed_len} after trimming; it ${shape}. For reference a full webhook URL is about 121 characters, or 127 with /slack. Check for a repository-level secret shadowing the organisation one -- the repository one wins."
+              echo "Discord was not notified: the webhook secret is not a URL (${raw_len} chars; it ${shape})." >> "$GITHUB_STEP_SUMMARY"
               exit 0 ;;
           esac
 
