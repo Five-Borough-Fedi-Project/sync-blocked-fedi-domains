@@ -76,6 +76,19 @@ MIN_ROWS = 50
 MAX_NEW_ABSOLUTE = 10
 MAX_NEW_PCT = 10.0
 
+# Lifting a block is the direction that reduces protection, so it gets a
+# tighter rail than the ceiling above rather than sharing it. At 621 blocks the
+# ceiling is 62, and sixty-two silent un-blockings is not something this job
+# should be able to do on a schedule.
+#
+# Only allowlisted domains are ever candidates for lifting. Not `gone` -- the
+# domains that left the upstream lists -- because that set includes every block
+# masto.nyc made for its own reasons: moderator decisions, user reports, and the
+# oliphant-era entries that predate this repository. The allowlist is the only
+# list here that is an explicit, reviewed, version-controlled statement that a
+# domain should not be blocked, which is what makes it safe to act on.
+MAX_REMOVALS_AUTO = 5
+
 EXPECTED_HEADER = ["domain", "severity", "public_comment"]
 
 # Ordered least to most severe, for spotting escalations. fediblockhole will
@@ -131,7 +144,7 @@ def read_instance(path):
 
 
 def main(argv):
-    if len(argv) != 4:
+    if len(argv) != 5:
         print(__doc__.strip(), file=sys.stderr)
         return 2
 
@@ -175,6 +188,21 @@ def main(argv):
 
     print("allowlist: %d entries, none present in the merged list" % len(allowed))
 
+    # Allowlisted domains the instance still blocks. The allowlist says these
+    # should not be blocked; until now it could only stop them being re-added,
+    # which left "allowed" and "blocked" true at the same time.
+    remove = sorted(allowed & set(current))
+    with open(argv[4], "w", encoding="utf-8") as fh:
+        for domain in remove:
+            block_id = current[domain].get("id")
+            if not block_id:
+                # Without an id there is nothing to DELETE. Say so rather than
+                # dropping it silently.
+                print("reason: %s is allowlisted and blocked, but the admin API "
+                      "gave no id for the block, so it cannot be lifted." % domain)
+                continue
+            fh.write("%s\t%s\n" % (block_id, domain))
+
     markers = sorted(d for d in candidate if d.endswith(RESERVED_TLD))
     for d in markers:
         del candidate[d]
@@ -202,12 +230,25 @@ def main(argv):
         print("  + %s (%s)" % (d, candidate[d]["severity"]))
     for d in escalations:
         print("  ^ %s (%s -> %s)" % (d, current[d].get("severity"), candidate[d]["severity"]))
+    print("would lift the block on: %d" % len(remove))
+    for d in remove:
+        print("  - %s (currently %s, allowlisted)" % (d, current[d].get("severity")))
 
     # The gate is on additions and escalations together, since both change what
     # federation does. Removals cannot be acted on, so they cannot be anomalous.
-    changes = len(new) + len(escalations)
+    changes = len(new) + len(escalations) + len(remove)
     ceiling = max(MAX_NEW_ABSOLUTE, int(len(current) * MAX_NEW_PCT / 100.0))
     print("changes: %d, ceiling: %d" % (changes, ceiling))
+
+    if len(remove) > MAX_REMOVALS_AUTO:
+        print(
+            "reason: %d blocks would be lifted, over the limit of %d for an "
+            "unattended run. Lifting a block reduces protection, so a person "
+            "confirms it however small the overall change is."
+            % (len(remove), MAX_REMOVALS_AUTO)
+        )
+        print("verdict=review")
+        return 0
 
     if changes == 0:
         print("verdict=ok")

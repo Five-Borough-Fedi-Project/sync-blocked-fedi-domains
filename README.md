@@ -27,15 +27,25 @@ threads.net,noop,"Moderator decision, 2026-10-09."
 fediblockhole only reads `domain`. Say *why* in the comment — in a year it is
 the only record of the decision.
 
+More than five blocks lifted in one run is held for review whatever the
+overall change size, because lifting is the direction that reduces protection.
+Allowlisting a batch therefore needs one `allow_large_change` dispatch, which
+is the point: somebody reads the list before federation reopens.
+
 Two things to know:
 
 - **Matching is exact.** An entry for `example.com` does not cover
   `social.example.com`. These lists carry root domains so that is fine in
   practice, but a list adding a subdomain variant needs its own row.
-- **Removing an entry does not unblock anything.** This tool never deletes a
-  block. Taking a domain out of the allowlist means the next run is free to
-  block it; putting one in does not undo a block already applied. That is a
-  manual change under **Moderation > Federation**.
+- **Adding an entry lifts the block.** If a domain you allowlist is already
+  blocked, the next approved run removes that block. This is the only thing
+  here that ever un-blocks anything, and the allowlist is the only input it
+  will act on: a domain that merely dropped off the upstream lists stays
+  blocked, because that set also holds every block made by a moderator, from a
+  report, or inherited from the oliphant era.
+- **Removing an entry does not re-block anything by itself.** Taking a domain
+  out of the allowlist just means the next run is free to block it again if a
+  source still lists it.
 
 ## What it subscribes to
 
