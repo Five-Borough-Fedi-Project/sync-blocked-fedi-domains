@@ -125,19 +125,88 @@ jobs:
               except Exception:
                   body = "(unreadable)"
               print("  body: %s" % (body or "(empty)"))
-              if exc.code in (401, 403) and "outside the authorized scopes" in body:
-                  print("  -> Mastodon itself refused this: the token's scopes are "
-                        "wrong. It needs admin:read:domain_blocks, or the broader "
-                        "admin:read.")
-              elif exc.code == 403 and "text/html" in (exc.headers.get("content-type") or ""):
-                  print("  -> an HTML 403 is not Mastodon. Something in front of the "
-                        "instance refused the runner -- check for a WAF or bot rule, "
+              # Mastodon's three 403 bodies are three different gates, and the
+              # exact strings are the only way to tell them apart. Read out of
+              # mastodon/mastodon rather than guessed:
+              #
+              #   "outside the authorized scopes"  Doorkeeper: the token's scopes
+              #   "This action is not allowed"     Mastodon::NotPermittedError
+              #   "Forbidden"                      respond_with_error(403), which
+              #                                    renders HTTP_STATUS_CODES[403]
+              #                                    for Pundit::NotAuthorizedError
+              #
+              # The last one is the policy check -- DomainBlockPolicy#index? asking
+              # role.can?(:manage_federation). Crucially it evaluates the role of
+              # the *user attached to the token*, which is a separate gate from the
+              # scope check above it. A token with the right scopes and no user
+              # behind it passes the first and fails the second, which looks exactly
+              # like a misconfigured role on an instance whose roles are all fine.
+              # That cost a day on run 39366345446, so whoami() below settles it.
+              if "outside the authorized scopes" in body:
+                  print("  -> Doorkeeper refused this on scopes. The token needs "
+                        "admin:read:domain_blocks, or the broader admin:read.")
+              elif "This action is not allowed" in body:
+                  print("  -> Mastodon refused this explicitly (NotPermittedError), "
+                        "which is neither the scopes nor the policy.")
+              elif "text/html" in (exc.headers.get("content-type") or ""):
+                  print("  -> an HTML body is not Mastodon. Something in front of the "
+                        "instance refused the runner; check for a WAF or bot rule, "
                         "not the token.")
-              elif exc.code in (401, 403):
-                  print("  -> a JSON-less %s from Mastodon usually means the token's "
-                        "account lost the Manage Federation role permission, which is "
-                        "required alongside the scope." % exc.code)
+              elif '"Forbidden"' in body:
+                  print("  -> this is Mastodon's authorization policy, not its scope "
+                        "check: the scopes passed and DomainBlockPolicy#index? then "
+                        "refused. It asks role.can?(:manage_federation) of the user "
+                        "attached to the token, so either that user's role lacks the "
+                        "permission or no user is attached at all.")
+              elif exc.code == 401:
+                  print("  -> 401 is the token itself being rejected: wrong, revoked "
+                        "or truncated, rather than insufficiently privileged.")
+              whoami()
               sys.exit(1)
+
+
+          def whoami():
+              """Who the token says it is.
+
+              A policy refusal says we were not allowed; this says who we were.
+              Both endpoints are read-only and neither needs an admin scope.
+
+              The decisive case is a 422 from accounts/verify_credentials. Per
+              Api::BaseController, require_user! renders "This method requires an
+              authenticated user" with 422 when there is no current_user -- so a
+              422 here means no user is bound to this token at all. That is an
+              application or client-credentials token, and it explains a policy
+              refusal on an instance where every role is correct.
+              """
+              print("what this token is:")
+              for path, label in (
+                  ("/api/v1/apps/verify_credentials", "application"),
+                  ("/api/v1/accounts/verify_credentials", "user"),
+              ):
+                  req = urllib.request.Request("https://masto.nyc" + path, headers={
+                      "Authorization": "Bearer " + token,
+                      "User-Agent": "masto.nyc blocklist-sync",
+                  })
+                  try:
+                      with urllib.request.urlopen(req, timeout=15) as resp:
+                          data = json.load(resp)
+                  except urllib.error.HTTPError as exc:
+                      detail = exc.read(200).decode("utf-8", "replace").strip()
+                      print("  %s: HTTP %s %s" % (label, exc.code, detail))
+                      if label == "user" and exc.code == 422:
+                          print("    -> no user is bound to this token. It is an "
+                                "application token, not a user token, so every "
+                                "policy check fails however the roles are set. "
+                                "Issue a user token instead.")
+                      continue
+                  except Exception as exc:  # noqa: BLE001 - diagnostics only
+                      print("  %s: could not be checked (%s)" % (label, exc))
+                      continue
+                  if label == "application":
+                      print("  application: %r" % (data.get("name") or "(unnamed)"))
+                  else:
+                      print("  user: @%s (account id %s)" % (
+                          data.get("username"), data.get("id")))
 
           token = os.environ["TOKEN"]
           url = "https://masto.nyc/api/v1/admin/domain_blocks?limit=200"
