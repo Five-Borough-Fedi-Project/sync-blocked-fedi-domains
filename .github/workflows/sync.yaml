@@ -142,26 +142,39 @@ jobs:
               # behind it passes the first and fails the second, which looks exactly
               # like a misconfigured role on an instance whose roles are all fine.
               # That cost a day on run 39366345446, so whoami() below settles it.
+              cause = "HTTP %s from the admin API" % exc.code
               if "outside the authorized scopes" in body:
+                  cause = "the token's scopes do not cover admin:read"
                   print("  -> Doorkeeper refused this on scopes. The token needs "
                         "admin:read:domain_blocks, or the broader admin:read.")
               elif "This action is not allowed" in body:
+                  cause = "Mastodon refused the request outright"
                   print("  -> Mastodon refused this explicitly (NotPermittedError), "
                         "which is neither the scopes nor the policy.")
               elif "text/html" in (exc.headers.get("content-type") or ""):
+                  cause = "something in front of masto.nyc blocked the runner"
                   print("  -> an HTML body is not Mastodon. Something in front of the "
                         "instance refused the runner; check for a WAF or bot rule, "
                         "not the token.")
               elif '"Forbidden"' in body:
+                  cause = "Mastodon's authorization policy refused the token"
                   print("  -> this is Mastodon's authorization policy, not its scope "
                         "check: the scopes passed and DomainBlockPolicy#index? then "
                         "refused. It asks role.can?(:manage_federation) of the user "
                         "attached to the token, so either that user's role lacks the "
                         "permission or no user is attached at all.")
               elif exc.code == 401:
+                  cause = "the token is not valid on masto.nyc"
                   print("  -> 401 is the token itself being rejected: wrong, revoked "
                         "or truncated, rather than insufficiently privileged.")
-              whoami()
+
+              # whoami knows more than the status code does, so it gets the last
+              # word on the cause. The notification carries this one line, which
+              # is the difference between somebody acting on it and somebody
+              # opening the run to find out what happened.
+              with open("/tmp/failure.txt", "w", encoding="utf-8") as fh:
+                  fh.write("masto.nyc would not let the job read its domain "
+                           "blocks: %s." % (whoami() or cause))
               sys.exit(1)
 
 
@@ -178,6 +191,7 @@ jobs:
               application or client-credentials token, and it explains a policy
               refusal on an instance where every role is correct.
               """
+              verdict = None
               print("what this token is:")
               for path, label in (
                   ("/api/v1/apps/verify_credentials", "application"),
@@ -193,7 +207,11 @@ jobs:
                   except urllib.error.HTTPError as exc:
                       detail = exc.read(200).decode("utf-8", "replace").strip()
                       print("  %s: HTTP %s %s" % (label, exc.code, detail))
-                      if label == "user" and exc.code == 422:
+                      if exc.code == 401:
+                          verdict = "the token is not valid on masto.nyc any more"
+                      elif label == "user" and exc.code == 422:
+                          verdict = ("the token has no user attached, so every "
+                                     "policy check fails whatever the roles say")
                           print("    -> no user is bound to this token. It is an "
                                 "application token, not a user token, so every "
                                 "policy check fails however the roles are set. "
@@ -207,6 +225,10 @@ jobs:
                   else:
                       print("  user: @%s (account id %s)" % (
                           data.get("username"), data.get("id")))
+                      verdict = ("the token is @%s's, and that account is not "
+                                 "allowed to manage federation"
+                                 % data.get("username"))
+              return verdict
 
           token = os.environ["TOKEN"]
           url = "https://masto.nyc/api/v1/admin/domain_blocks?limit=200"
@@ -423,16 +445,19 @@ jobs:
                 detail=$(cat /tmp/diff.shown)
               fi ;;
             fail)
-              head="**Blocklist sync refused the fetched data.** Nothing was applied, and there is nothing worth reviewing: the input is broken, not the decision."
-              detail=$(grep '^reason:' /tmp/report.txt 2>/dev/null | head -5 || echo "see the run") ;;
+              head="**Blocklist sync rejected the lists it fetched.** Nothing changed on masto.nyc."
+              detail=$(grep '^reason:' /tmp/report.txt 2>/dev/null | head -5) ;;
             *)
-              # No verdict at all: a step before the gate died and check.py
-              # never ran. Distinct from `fail`, where check.py did run and
-              # judged the data untrustworthy. Saying the lists are broken
-              # here would be a lie -- run 38394671307 said exactly that
-              # after the instance read returned 403.
-              head="**Blocklist sync broke before it could judge anything.** Nothing was applied and no list was assessed. A step before the gate failed, so this is the job, the token or the instance -- not the blocklists."
-              detail="see the run" ;;
+              # No verdict: a step before the gate died, so check.py never ran.
+              # Distinct from `fail`, where it ran and distrusted the data --
+              # blaming the lists here would be wrong, which is what run
+              # 38394671307 did.
+              #
+              # /tmp/failure.txt is the one line the failing step wrote about
+              # itself. The old message said "see the run" instead, which is
+              # the notification admitting it has nothing to tell you.
+              head="**Blocklist sync failed.** Nothing changed on masto.nyc."
+              detail=$(cat /tmp/failure.txt 2>/dev/null) ;;
           esac
 
           base="${WEBHOOK%/}"; base="${base%/slack}"; base="${base%/github}"
@@ -467,8 +492,15 @@ jobs:
               exit 0 ;;
           esac
 
-          jq -nc --arg head "$head" --arg detail "$detail" --arg url "$RUN_URL" \
-            '{text: ($head + "\n```\n" + $detail + "\n```\n" + $url)}' > /tmp/payload.json
+          # An empty fence is noise, so the detail block is only included when
+          # there is something in it.
+          if [ -n "$detail" ]; then
+            jq -nc --arg head "$head" --arg detail "$detail" --arg url "$RUN_URL" \
+              '{text: ($head + "\n```\n" + $detail + "\n```\n" + $url)}' > /tmp/payload.json
+          else
+            jq -nc --arg head "$head" --arg url "$RUN_URL" \
+              '{text: ($head + "\n" + $url)}' > /tmp/payload.json
+          fi
 
           # This step reports; it does not decide. A notifier that cannot be
           # reached must not invent a failure, nor mask the one the rest of the
