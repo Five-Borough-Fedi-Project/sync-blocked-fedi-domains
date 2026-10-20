@@ -283,13 +283,13 @@ jobs:
           # not an error, so it exits 0 and the verdict is read from stdout.
           set +e
           python3 scripts/check.py /tmp/candidate.csv /tmp/instance.json \
-            /tmp/applicable.csv > /tmp/report.txt
+            /tmp/applicable.csv /tmp/remove.tsv > /tmp/report.txt
           rc=$?
           set -e
           cat /tmp/report.txt
           verdict=$(grep -oP '^verdict=\K\w+' /tmp/report.txt || echo fail)
           echo "verdict=${verdict}" >> "$GITHUB_OUTPUT"
-          echo "changes=$(grep -c '^  [+^]' /tmp/report.txt || true)" >> "$GITHUB_OUTPUT"
+          echo "changes=$(grep -c '^  [+^-]' /tmp/report.txt || true)" >> "$GITHUB_OUTPUT"
           {
             echo "### Blocklist sync: \`${verdict}\`"
             echo
@@ -380,6 +380,43 @@ jobs:
           /tmp/fbh/bin/fediblock-sync -c /tmp/apply.toml --loglevel info \
             --override-private-comment "masto.nyc blocklist-sync $(date -u +%Y-%m-%d)"
 
+          # Lift the blocks on allowlisted domains. fediblockhole defines
+          # delete_block and never calls it, so this is ours to do.
+          #
+          # The list comes from check.py and contains nothing but allowlisted
+          # domains it found still blocked. It is deliberately not derived here:
+          # the step that decides is the step that gets reviewed, and an apply
+          # step that worked out its own removals could widen them.
+          #
+          # Additions go first. If the push fails the job stops before lifting
+          # anything, which is the right way round -- a half-finished run that
+          # blocked too much is recoverable, one that unblocked too much is a
+          # federation change nobody asked for.
+          lifted=0
+          while IFS=$'\t' read -r block_id domain; do
+            [ -n "${block_id:-}" ] || continue
+            code=$(curl -sS -o /tmp/lift.json -w '%{http_code}' \
+              -X DELETE "https://masto.nyc/api/v1/admin/domain_blocks/${block_id}" \
+              -H "Authorization: Bearer ${TOKEN}")
+            case "$code" in
+              200)
+                echo "lifted the block on ${domain} (id ${block_id})"
+                lifted=$((lifted + 1)) ;;
+              404)
+                # Already gone, which is the state we wanted. Not a lift, so it
+                # is not counted as one.
+                echo "${domain} (id ${block_id}) was already unblocked" ;;
+              *)
+                echo "::error::Could not lift the block on ${domain} (id ${block_id}): HTTP ${code}."
+                head -c 300 /tmp/lift.json || true
+                exit 1 ;;
+            esac
+            sleep 1
+          done < /tmp/remove.tsv
+          if [ "$lifted" -gt 0 ]; then
+            echo "Lifted ${lifted} block(s) on allowlisted domains." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
           echo "Applied." >> "$GITHUB_STEP_SUMMARY"
 
       # One message per run that did something, carrying the actual diff.
@@ -418,7 +455,7 @@ jobs:
           # Capped, because Discord rejects a message over 2000 characters and
           # a genuinely large change would blow past that. The cap says so
           # rather than silently truncating, and the run link has the rest.
-          grep '^  [+^]' /tmp/report.txt > /tmp/diff.txt 2>/dev/null || true
+          grep '^  [+^-]' /tmp/report.txt > /tmp/diff.txt 2>/dev/null || true
           total=$(wc -l < /tmp/diff.txt)
           if [ "$total" -gt 25 ]; then
             { head -25 /tmp/diff.txt; echo "  ... and $(( total - 25 )) more, see the run"; } > /tmp/diff.shown
