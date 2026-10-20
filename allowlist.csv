@@ -1,3 +1,9 @@
 domain,severity,public_comment
 masto.nyc,noop,"Never block ourselves. Present in CARIAD as the iftas:canary row is not, but a self-block would break federation for our own users."
 threads.net,noop,"Moderator decision, 2026-10-09. Listed in CARIAD 66% as iftas:cariad66, suspend. Allowed deliberately."
+sigmoid.social,noop,"Allowlist test, 2026-10-20. AUD only, iftas:disinformation;cib;spam. 9 published rules, approval-required signups, contact @thegradient, 685 monthly active on Mastodon 4.7.3. The ML research community instance. Our policy blocks a server for rule-breaking content AND no obvious moderation; this fails the second half."
+tty0.social,noop,"Allowlist test, 2026-10-20. AUD only, same blanket reason. 3 published rules, approval-required signups, contact @bketelsen, 62 monthly active. Moderation is plainly set up."
+social.5th.ro,noop,"Allowlist test, 2026-10-20. AUD only, same blanket reason. 5 published rules, approval-required signups, contact @5th, 114 monthly active. Romanian general instance, not abandoned and not unmoderated."
+mikumikudance.cloud,noop,"Allowlist test, 2026-10-20. AUD only, same blanket reason. 5 published rules, registration closed, contact @manage, 60 monthly active of 4500 registered. Touhou/MMD community."
+mstdn.at,noop,"Allowlist test, 2026-10-20. AUD only, same blanket reason. 7 published rules, registration closed, contact @mastodon. Only 2 monthly active, so winding down rather than spamming."
+social.roadfm.fr,noop,"Allowlist test, 2026-10-20. AUD only, same blanket reason. 4 published rules, contact @gaetan, 484 monthly active on Mastodon 4.7.2. Registration is open, which is the weakest case of these six, but rules and a named admin are present."
