@@ -313,9 +313,9 @@ def main(argv):
         print("  + %s (%s%s)" % (d, pushed[d], note(d)))
     for d in escalations:
         print("  ^ %s (%s -> %s%s)" % (d, current[d].get("severity"), pushed[d], note(d)))
-    # Not a `+`, `^` or `-` line, so the workflow neither counts it nor sends it
-    # to Discord. It stays in the run summary for whoever wants to know why a
-    # listed domain is only silenced.
+    # Not a `+`, `^` or `-` line, so the workflow does not count it as a change
+    # or show it as applied. The weekly message lists it separately, as still
+    # silenced, so a moderator can decide whether to suspend it by hand.
     for d in held:
         print("  = %s (stays %s; %s held back, %d local follow(s))" % (
             d, current[d].get("severity"), candidate[d]["severity"], follows[d]))
