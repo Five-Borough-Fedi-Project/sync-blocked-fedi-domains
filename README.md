@@ -83,7 +83,7 @@ and publishes its thresholds as numbers.
 
 Nothing is stored. What this instance blocks is whatever
 `/api/v1/admin/domain_blocks` says it blocks, and the merged lists are compared
-against that. `scripts/check.py` returns one of three verdicts.
+against that. `scripts/check.py` returns one of three verdicts (plus `error`, below).
 
 **`ok` — apply it.** Additions and severity escalations within the gate go
 straight in, and Discord gets the diff.
@@ -125,6 +125,13 @@ list can never trip the size gate.
 and a suspend severs existing follow relationships; this caps it at silence
 where a follow exists. It is the single setting that makes automating this
 defensible.
+
+`scripts/check.py` asks the same question before it decides anything, so a
+suspend the guard is going to refuse is not counted or announced. A silenced
+domain that a list wants suspended, and that somebody here follows, stays
+silenced without a daily "silence -> suspend" in Discord; the run summary lists
+it under `=` with the follow count. If that question cannot be answered, the
+verdict is `error` and nothing is applied.
 
 ## Confirming it ran
 

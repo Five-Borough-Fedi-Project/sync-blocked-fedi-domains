@@ -277,6 +277,11 @@ jobs:
       - name: Decide whether it can apply itself
         id: decide
         if: steps.token.outputs.have_token == 'yes'
+        env:
+          # For /api/v1/admin/measures: check.py asks the follow question
+          # fediblockhole will ask, so a suspend the guard is going to refuse
+          # is not reported as a change.
+          TOKEN: ${{ secrets.MASTODON_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
           # The script exits non-zero only on `fail`. `review` is a decision,
@@ -288,6 +293,11 @@ jobs:
           set -e
           cat /tmp/report.txt
           verdict=$(grep -oP '^verdict=\K\w+' /tmp/report.txt || echo fail)
+          if [ "$verdict" = "error" ]; then
+            # Not the lists' fault, so Discord takes the "sync failed" path and
+            # carries this line, the same as a failure before the gate.
+            grep -oP '^reason: \K.*' /tmp/report.txt | head -1 > /tmp/failure.txt
+          fi
           echo "verdict=${verdict}" >> "$GITHUB_OUTPUT"
           echo "changes=$(grep -c '^  [+^-]' /tmp/report.txt || true)" >> "$GITHUB_OUTPUT"
           {
@@ -569,6 +579,9 @@ jobs:
             review)
               if [ "${{ inputs.allow_large_change }}" = "true" ]; then exit 0; fi
               echo "::error::The change is larger than the gate allows. Read the summary, then re-run with allow_large_change if it is right."
+              exit 1 ;;
+            error)
+              echo "::error::$(cat /tmp/failure.txt 2>/dev/null) Nothing was applied."
               exit 1 ;;
             *)
               echo "::error::The fetched blocklist data did not pass its checks. Nothing was applied."

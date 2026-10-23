@@ -5,12 +5,14 @@ The instance is the state. There is no committed copy of the blocklist to diff
 against: what masto.nyc currently blocks is whatever /api/v1/admin/domain_blocks
 says it blocks, and this compares the freshly merged lists against that.
 
-Three verdicts, on stdout as `verdict=...` for the workflow to read:
+Four verdicts, on stdout as `verdict=...` for the workflow to read:
 
   ok       the delta is routine. Apply it.
   review   the delta is anomalously large. Do not apply; a human looks first.
   fail     the fetched data is not trustworthy. Do not apply, and do not
            pretend a human could usefully review it either.
+  error    the data is fine but the instance could not answer a question the
+           decision needs. Do not apply.
 
 The distinction between `review` and `fail` is the point. A bad fetch from
 Google Sheets produces a small or empty list, which is a `fail`: there is
@@ -21,12 +23,18 @@ Writes the rows that should actually be pushed to APPLICABLE_CSV, which is
 the merged list minus the marker rows. The apply step reads that file and not
 the raw merge, so a canary can never reach the instance.
 
-Usage: check.py CANDIDATE_CSV INSTANCE_JSON APPLICABLE_CSV
+It also asks the instance the question fediblockhole will ask before it
+suspends anything, so that a suspend the follow guard is going to refuse is not
+reported as a change. That needs TOKEN in the environment.
+
+Usage: check.py CANDIDATE_CSV INSTANCE_JSON APPLICABLE_CSV REMOVE_TSV
 """
 import csv
 import json
 import os
 import sys
+import urllib.error
+import urllib.request
 
 # Each IFTAS list carries its own marker row, in a TLD that cannot resolve, named
 # after the list. Verified against the live sheets on 2026-10-12:
@@ -95,6 +103,17 @@ EXPECTED_HEADER = ["domain", "severity", "public_comment"]
 # raise an existing block's severity; it never lowers one and never deletes.
 SEVERITY_RANK = {"noop": 0, "silence": 1, "suspend": 2}
 
+# Must match max_followed_severity on the destination in sync.yaml. Above this,
+# fediblockhole asks /api/v1/admin/measures how many local accounts follow
+# somebody on the domain, and caps the block here if any do.
+#
+# Leaving that out of the diff is what announced "silence -> suspend" for
+# channels.im, elonsucks.org and theater.im to Discord every morning (run
+# 39943392258 among them): the push asked, found followers, kept them at
+# silence, and the next run proposed the same three again. A change the guard
+# will refuse is not a change.
+MAX_FOLLOWED_SEVERITY = "silence"
+
 
 def read_candidate(path):
     with open(path, newline="", encoding="utf-8") as fh:
@@ -141,6 +160,40 @@ def read_instance(path):
             "this." % type(data).__name__
         )
     return {b["domain"]: b for b in data if b.get("domain")}
+
+
+def instance_follows(domain):
+    """Local follows of accounts at `domain`, exactly as fediblockhole counts them.
+
+    Same endpoint, same measure, same body as fetch_instance_follows in
+    fediblockhole 0.4.6. A different question here would let this report a
+    change the push then declines, which is the bug this exists to fix.
+    """
+    req = urllib.request.Request(
+        "https://masto.nyc/api/v1/admin/measures",
+        data=json.dumps({
+            "keys": ["instance_follows"],
+            "instance_follows": {"domain": domain},
+        }).encode(),
+        headers={
+            "Authorization": "Bearer " + os.environ["TOKEN"],
+            "Content-Type": "application/json",
+            "User-Agent": "masto.nyc blocklist-sync",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return int(json.load(resp)[0]["total"])
+
+
+def effective_severity(domain, severity, follows):
+    """What fediblockhole will actually push for this domain."""
+    cap = MAX_FOLLOWED_SEVERITY
+    if SEVERITY_RANK.get(severity, 0) <= SEVERITY_RANK[cap]:
+        return severity
+    if domain not in follows:
+        follows[domain] = instance_follows(domain)
+    return cap if follows[domain] > 0 else severity
 
 
 def main(argv):
@@ -214,22 +267,58 @@ def main(argv):
     # only: fediblockhole has no code path that deletes a domain block, so a
     # domain leaving the upstream lists stays blocked here until a person
     # removes it by hand.
-    new = sorted(set(candidate) - set(current))
-    escalations = sorted(
-        d
-        for d in set(candidate) & set(current)
-        if SEVERITY_RANK.get(candidate[d]["severity"], 0)
-        > SEVERITY_RANK.get(current[d].get("severity", "noop"), 0)
-    )
+    #
+    # Severities are the ones the push will really use: anything above
+    # MAX_FOLLOWED_SEVERITY is checked for local follows first, as fediblockhole
+    # does. An escalation that ends up where it already is goes under `held`
+    # rather than `escalations`, so it is neither counted nor announced.
+    follows = {}
+    try:
+        new = sorted(set(candidate) - set(current))
+        pushed = {d: effective_severity(d, candidate[d]["severity"], follows)
+                  for d in new}
+        escalations, held = [], []
+        for d in sorted(set(candidate) & set(current)):
+            was = SEVERITY_RANK.get(current[d].get("severity", "noop"), 0)
+            if SEVERITY_RANK.get(candidate[d]["severity"], 0) <= was:
+                continue
+            pushed[d] = effective_severity(d, candidate[d]["severity"], follows)
+            if SEVERITY_RANK.get(pushed[d], 0) > was:
+                escalations.append(d)
+            else:
+                held.append(d)
+    except (urllib.error.URLError, OSError, KeyError, IndexError, ValueError) as exc:
+        # The push would hit the same wall on its first suspend. Stopping here
+        # changes nothing, which is the better place to find out.
+        #
+        # `error`, not `fail`: the lists are fine, the instance did not answer.
+        # `fail` would have Discord blame the lists for it.
+        print("reason: could not ask masto.nyc who follows the domains about to "
+              "be suspended (%s). The follow guard depends on that answer, and "
+              "the token needs admin:read for it." % exc)
+        print("verdict=error")
+        return 1
     gone = sorted(set(current) - set(candidate))
+
+    def note(d):
+        if pushed[d] == candidate[d]["severity"]:
+            return ""
+        return "; %s held back, %d local follow(s)" % (candidate[d]["severity"], follows[d])
 
     print("would add: %d" % len(new))
     print("would raise severity on: %d" % len(escalations))
+    print("held at their current severity by local follows: %d" % len(held))
     print("no longer listed upstream (left alone): %d" % len(gone))
     for d in new:
-        print("  + %s (%s)" % (d, candidate[d]["severity"]))
+        print("  + %s (%s%s)" % (d, pushed[d], note(d)))
     for d in escalations:
-        print("  ^ %s (%s -> %s)" % (d, current[d].get("severity"), candidate[d]["severity"]))
+        print("  ^ %s (%s -> %s%s)" % (d, current[d].get("severity"), pushed[d], note(d)))
+    # Not a `+`, `^` or `-` line, so the workflow neither counts it nor sends it
+    # to Discord. It stays in the run summary for whoever wants to know why a
+    # listed domain is only silenced.
+    for d in held:
+        print("  = %s (stays %s; %s held back, %d local follow(s))" % (
+            d, current[d].get("severity"), candidate[d]["severity"], follows[d]))
     print("would lift the block on: %d" % len(remove))
     for d in remove:
         print("  - %s (currently %s, allowlisted)" % (d, current[d].get("severity")))
