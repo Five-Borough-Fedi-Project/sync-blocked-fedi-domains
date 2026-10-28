@@ -34,9 +34,14 @@ name: Sync blocked fedi domains
 
 on:
   schedule:
-    # 11:00 UTC daily. Clear of the backup (01:30), sync-blocked-email-domains
+    # 11:00 UTC on Mondays. Weekly because the IFTAS lists move weekly at
+    # most, and because a domain the follow guard holds at silence comes up
+    # on every run: once a week it is a reminder, daily it was noise that
+    # read like the same three changes being applied over and over.
+    #
+    # Clear of the backup (01:30), sync-blocked-email-domains
     # (03:00), its watchdog (09:00) and the Mastodon upgrade check (13:00).
-    - cron: '0 11 * * *'
+    - cron: '0 11 * * 1'
   workflow_dispatch:
     inputs:
       allow_large_change:
@@ -277,6 +282,11 @@ jobs:
       - name: Decide whether it can apply itself
         id: decide
         if: steps.token.outputs.have_token == 'yes'
+        env:
+          # For /api/v1/admin/measures: check.py asks the follow question
+          # fediblockhole will ask, so a suspend the guard is going to refuse
+          # is not reported as a change.
+          TOKEN: ${{ secrets.MASTODON_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
           # The script exits non-zero only on `fail`. `review` is a decision,
@@ -288,8 +298,14 @@ jobs:
           set -e
           cat /tmp/report.txt
           verdict=$(grep -oP '^verdict=\K\w+' /tmp/report.txt || echo fail)
+          if [ "$verdict" = "error" ]; then
+            # Not the lists' fault, so Discord takes the "sync failed" path and
+            # carries this line, the same as a failure before the gate.
+            grep -oP '^reason: \K.*' /tmp/report.txt | head -1 > /tmp/failure.txt
+          fi
           echo "verdict=${verdict}" >> "$GITHUB_OUTPUT"
           echo "changes=$(grep -c '^  [+^-]' /tmp/report.txt || true)" >> "$GITHUB_OUTPUT"
+          echo "held=$(grep -c '^  = ' /tmp/report.txt || true)" >> "$GITHUB_OUTPUT"
           {
             echo "### Blocklist sync: \`${verdict}\`"
             echo
@@ -435,6 +451,7 @@ jobs:
           WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK }}
           VERDICT: ${{ steps.decide.outputs.verdict }}
           CHANGES: ${{ steps.decide.outputs.changes }}
+          HELD: ${{ steps.decide.outputs.held }}
           APPLIED: ${{ steps.apply.outcome }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -444,11 +461,23 @@ jobs:
             exit 0
           fi
           # A clean run with nothing to do says nothing. A channel that gets a
-          # daily "nothing to report" is a channel that gets muted, and a muted
-          # channel is worse than no channel.
-          if [ "${VERDICT:-}" = "ok" ] && [ "${CHANGES:-0}" = "0" ]; then
+          # "nothing to report" every week is a channel that gets muted, and a
+          # muted channel is worse than no channel.
+          #
+          # Held domains are the exception: a list wants them suspended and
+          # the follow guard will not, so they stay silenced until a moderator
+          # decides otherwise. That is a standing decision somebody may want
+          # to make, so it is said once a week rather than not at all.
+          if [ "${VERDICT:-}" = "ok" ] && [ "${CHANGES:-0}" = "0" ] && [ "${HELD:-0}" = "0" ]; then
             echo "Nothing changed, so nothing was sent."
             exit 0
+          fi
+
+          # Said apart from the diff and never as "applied": these did not
+          # change, and saying so is the whole point of listing them.
+          held=""
+          if [ "${HELD:-0}" != "0" ]; then
+            held=$(grep '^  = ' /tmp/report.txt | head -25)
           fi
 
           # The diff itself: the + and ^ lines scripts/check.py emitted.
@@ -468,10 +497,12 @@ jobs:
           case "${VERDICT:-}" in
             ok|review)
               if [ "${APPLIED:-skipped}" = "success" ]; then
-                if [ "${VERDICT}" = "review" ]; then
-                  head="**Blocklist updated** (a held change, accepted by hand): ${CHANGES} applied to masto.nyc."
+                if [ "${CHANGES:-0}" = "0" ]; then
+                  head="**Weekly blocklist sync**: nothing new to apply to masto.nyc."
+                elif [ "${VERDICT}" = "review" ]; then
+                  head="**Weekly blocklist sync** (a held change, accepted by hand): ${CHANGES} applied to masto.nyc."
                 else
-                  head="**Blocklist updated**: ${CHANGES} applied to masto.nyc."
+                  head="**Weekly blocklist sync**: ${CHANGES} applied to masto.nyc."
                 fi
                 detail=$(cat /tmp/diff.shown)
               elif [ "${APPLIED:-skipped}" = "failure" ]; then
@@ -529,15 +560,19 @@ jobs:
               exit 0 ;;
           esac
 
-          # An empty fence is noise, so the detail block is only included when
-          # there is something in it.
-          if [ -n "$detail" ]; then
-            jq -nc --arg head "$head" --arg detail "$detail" --arg url "$RUN_URL" \
-              '{text: ($head + "\n```\n" + $detail + "\n```\n" + $url)}' > /tmp/payload.json
-          else
-            jq -nc --arg head "$head" --arg url "$RUN_URL" \
-              '{text: ($head + "\n" + $url)}' > /tmp/payload.json
-          fi
+          # An empty fence is noise, so each block is only included when there
+          # is something in it.
+          jq -nc --arg head "$head" --arg detail "${detail:-}" --arg held "$held" \
+            --arg url "$RUN_URL" '
+            def fence: "```\n" + . + "\n```\n";
+            {text: (
+              $head + "\n"
+              + (if $detail != "" then ($detail | fence) else "" end)
+              + (if $held != "" then
+                  "Still silenced, not suspended: a list wants these suspended, but people here follow accounts on them, so the sync will not cut those follows. Suspending them anyway is a moderator call, made by hand.\n"
+                  + ($held | fence)
+                else "" end)
+              + $url)}' > /tmp/payload.json
 
           # This step reports; it does not decide. A notifier that cannot be
           # reached must not invent a failure, nor mask the one the rest of the
@@ -569,6 +604,9 @@ jobs:
             review)
               if [ "${{ inputs.allow_large_change }}" = "true" ]; then exit 0; fi
               echo "::error::The change is larger than the gate allows. Read the summary, then re-run with allow_large_change if it is right."
+              exit 1 ;;
+            error)
+              echo "::error::$(cat /tmp/failure.txt 2>/dev/null) Nothing was applied."
               exit 1 ;;
             *)
               echo "::error::The fetched blocklist data did not pass its checks. Nothing was applied."
