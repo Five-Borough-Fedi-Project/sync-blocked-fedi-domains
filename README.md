@@ -127,11 +127,11 @@ where a follow exists. It is the single setting that makes automating this
 defensible.
 
 `scripts/check.py` asks the same question before it decides anything, so a
-suspend the guard is going to refuse is never reported as applied. A silenced
-domain that a list wants suspended, and that somebody here follows, is listed
-in the weekly message under "still silenced, not suspended" with its follow
-count, until a moderator suspends it by hand or the follows go away. If that
-question cannot be answered, the verdict is `error` and nothing is applied.
+suspend the guard is going to refuse is never reported as applied. Those
+domains appear in every run's step summary with their follow counts, and ride
+along on any Discord message that was being sent anyway, until a moderator
+suspends one by hand or the follows go away. If that question cannot be
+answered, the verdict is `error` and nothing is applied.
 
 ## Confirming it ran
 
@@ -141,23 +141,23 @@ If it appears under **Moderation > Federation**, a push landed.
 
 It runs once a week, Mondays at 11:00 UTC, and can be run by hand from the
 Actions tab. Discord gets a message whenever something happened, carrying the
-diff, and separately anything the follow guard kept at silence:
+diff, and anything the follow guard kept at its current severity:
 
 ```
 **Weekly blocklist sync**: 2 applied to masto.nyc.
   + newbadsite.example (suspend)
   ^ known.example (silence -> suspend)
-Still silenced, not suspended: a list wants these suspended, but people here
-follow accounts on them, so the sync will not cut those follows. Suspending
-them anyway is a moderator call, made by hand.
-  = elonsucks.org (stays silence; suspend held back, 4 local follow(s))
+Left at their current severity, because somebody here follows them:
+  = elonsucks.org (stays silence, suspend held back, 4 local follows)
 ```
 
-A week with nothing applied and nothing held says nothing at all. A channel
-that gets a weekly "nothing to report" is a channel that gets muted. Held
-domains are repeated every week on purpose: they are a decision still open. The
-headline is keyed on whether the push actually succeeded rather than on the
-verdict, so a partial apply says so instead of claiming success.
+**A week with nothing applied says nothing at all**, held domains included. A
+channel that gets a weekly "nothing to report" is a channel that gets muted,
+and the held set is the same domains with the same counts every week until
+somebody acts — a standing state, not news. It was an exception to this rule
+for a while and the rule was right: the step summary on every run is where to
+read it. The headline is keyed on whether the push actually succeeded rather
+than on the verdict, so a partial apply says so instead of claiming success.
 
 ## Setup
 
