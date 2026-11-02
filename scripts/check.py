@@ -300,10 +300,13 @@ def main(argv):
         return 1
     gone = sorted(set(current) - set(candidate))
 
+    def follow_count(n):
+        return "%d local follow%s" % (n, "" if n == 1 else "s")
+
     def note(d):
         if pushed[d] == candidate[d]["severity"]:
             return ""
-        return "; %s held back, %d local follow(s)" % (candidate[d]["severity"], follows[d])
+        return "; %s held back, %s" % (candidate[d]["severity"], follow_count(follows[d]))
 
     print("would add: %d" % len(new))
     print("would raise severity on: %d" % len(escalations))
@@ -314,11 +317,14 @@ def main(argv):
     for d in escalations:
         print("  ^ %s (%s -> %s%s)" % (d, current[d].get("severity"), pushed[d], note(d)))
     # Not a `+`, `^` or `-` line, so the workflow does not count it as a change
-    # or show it as applied. The weekly message lists it separately, as still
-    # silenced, so a moderator can decide whether to suspend it by hand.
+    # or show it as applied. It also no longer causes a message on its own: the
+    # held set is the same every week until somebody acts, so it rides along on
+    # a message that was being sent anyway and otherwise lives in the step
+    # summary.
     for d in held:
-        print("  = %s (stays %s; %s held back, %d local follow(s))" % (
-            d, current[d].get("severity"), candidate[d]["severity"], follows[d]))
+        print("  = %s (stays %s, %s held back, %s)" % (
+            d, current[d].get("severity"), candidate[d]["severity"],
+            follow_count(follows[d])))
     print("would lift the block on: %d" % len(remove))
     for d in remove:
         print("  - %s (currently %s, allowlisted)" % (d, current[d].get("severity")))

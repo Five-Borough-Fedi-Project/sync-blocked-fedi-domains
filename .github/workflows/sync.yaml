@@ -464,11 +464,17 @@ jobs:
           # "nothing to report" every week is a channel that gets muted, and a
           # muted channel is worse than no channel.
           #
-          # Held domains are the exception: a list wants them suspended and
-          # the follow guard will not, so they stay silenced until a moderator
-          # decides otherwise. That is a standing decision somebody may want
-          # to make, so it is said once a week rather than not at all.
-          if [ "${VERDICT:-}" = "ok" ] && [ "${CHANGES:-0}" = "0" ] && [ "${HELD:-0}" = "0" ]; then
+          # Held domains used to be an exception to that, on the grounds that a
+          # moderator might want to suspend one by hand. They are not an
+          # exception. The held set is a standing state: the same domains, with
+          # the same counts, every Monday until somebody acts or a follow goes
+          # away. That is the definition of the noise the rule above exists to
+          # prevent, and it is what ran every week until 41433569398.
+          #
+          # They are still reported, in two places that cost nobody anything:
+          # the step summary on every run, and as a footnote on a message that
+          # was being sent anyway. What they no longer do is cause a message.
+          if [ "${VERDICT:-}" = "ok" ] && [ "${CHANGES:-0}" = "0" ]; then
             echo "Nothing changed, so nothing was sent."
             exit 0
           fi
@@ -497,9 +503,7 @@ jobs:
           case "${VERDICT:-}" in
             ok|review)
               if [ "${APPLIED:-skipped}" = "success" ]; then
-                if [ "${CHANGES:-0}" = "0" ]; then
-                  head="**Weekly blocklist sync**: nothing new to apply to masto.nyc."
-                elif [ "${VERDICT}" = "review" ]; then
+                if [ "${VERDICT}" = "review" ]; then
                   head="**Weekly blocklist sync** (a held change, accepted by hand): ${CHANGES} applied to masto.nyc."
                 else
                   head="**Weekly blocklist sync**: ${CHANGES} applied to masto.nyc."
@@ -569,7 +573,7 @@ jobs:
               $head + "\n"
               + (if $detail != "" then ($detail | fence) else "" end)
               + (if $held != "" then
-                  "Still silenced, not suspended: a list wants these suspended, but people here follow accounts on them, so the sync will not cut those follows. Suspending them anyway is a moderator call, made by hand.\n"
+                  "Left at their current severity, because somebody here follows them:\n"
                   + ($held | fence)
                 else "" end)
               + $url)}' > /tmp/payload.json
